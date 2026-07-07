@@ -106,6 +106,27 @@
     font-family:var(--mono);font-size:12px;font-weight:700;padding:2px 6px;border-radius:6px;
     white-space:nowrap}
   .leaflet-tooltip.well-label:before{display:none}
+
+  .btn:disabled{opacity:.4;cursor:not-allowed}
+
+  /* modo navegação */
+  #navBanner{position:absolute;top:0;left:0;right:0;z-index:1100;display:none;
+    align-items:center;justify-content:space-between;gap:12px;
+    padding:calc(10px + env(safe-area-inset-top)) 16px 12px;
+    background:linear-gradient(180deg,rgba(13,17,23,.97),rgba(13,17,23,.86));
+    border-bottom:1px solid var(--line)}
+  #navBanner.show{display:flex}
+  #navDist{font-family:var(--mono);font-size:24px;font-weight:800;color:var(--you);line-height:1.1}
+  #navSub{font-size:12px;color:var(--muted);margin-top:2px}
+  #navExit{background:var(--danger);border:0;color:#1a0000;font-weight:700;
+    padding:11px 18px;border-radius:12px;font-size:15px;cursor:pointer}
+  #navExit:active{transform:scale(.96)}
+  #recenter{position:absolute;left:50%;bottom:calc(24px + var(--sheetH,0px));transform:translateX(-50%);
+    z-index:1000;display:none;background:var(--panel);border:1px solid var(--you);color:var(--you);
+    border-radius:999px;padding:10px 18px;font-size:14px;font-weight:600;cursor:pointer;
+    box-shadow:0 6px 20px rgba(0,0,0,.5)}
+  #recenter.show{display:block}
+  .heading-arrow{filter:drop-shadow(0 0 3px rgba(0,0,0,.8))}
 </style>
 </head>
 <body>
@@ -125,6 +146,15 @@
 <button id="locBtn" class="fab" title="Minha localização">
   <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3.5"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg>
 </button>
+
+<div id="navBanner">
+  <div id="navInfo">
+    <div id="navDist">—</div>
+    <div id="navSub">seguindo a rota</div>
+  </div>
+  <button id="navExit">Sair</button>
+</div>
+<button id="recenter">Recentralizar</button>
 
 <div id="traceBar">
   <span class="chip hint" id="traceHint">Toque no mapa seguindo a trilha ↦ poço</span>
@@ -159,6 +189,14 @@
       <button class="btn wide" id="traceBtn">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-dasharray="3 3"><path d="M3 12h18"/></svg>
         Traçar acesso final na trilha (satélite)
+      </button>
+      <button class="btn" id="navBtn" disabled>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2 4.5 20.3 12 17l7.5 3.3z"/></svg>
+        Iniciar navegação
+      </button>
+      <button class="btn" id="clearBtn">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/></svg>
+        Limpar rota
       </button>
     </div>
   </div>
@@ -285,14 +323,18 @@ function closeSheet(){$("#sheet").classList.remove("show");document.documentElem
 $("#closeSheet").addEventListener("click",closeSheet);
 
 /* ---- localização ---- */
-let userLoc=null, userMarker=null, watchId=null;
+let userLoc=null, userMarker=null, watchId=null, heading=0, headingMarker=null;
 function setUser(lat,lon,acc){
-  userLoc=[lat,lon];
+  const np=[lat,lon];
+  if(userLoc && haversine(userLoc,np)>1.5) heading=bearing(userLoc,np);
+  userLoc=np;
   if(!userMarker){
-    userMarker=L.circleMarker([lat,lon],{radius:7,color:'#0D1117',weight:2,
+    userMarker=L.circleMarker(np,{radius:7,color:'#0D1117',weight:2,
       fillColor:'#00E0A4',fillOpacity:1}).addTo(map);
-  } else userMarker.setLatLng([lat,lon]);
+  } else userMarker.setLatLng(np);
+  updateHeadingMarker();
   $("#locBtn").classList.add("on"); $("#locBtn").classList.remove("loading");
+  if(navMode) navUpdate();
 }
 let pickLocMode=false;
 function enablePickLoc(msg){
@@ -324,9 +366,14 @@ $("#locBtn").addEventListener("click",()=>{
 });
 
 /* ---- rota (OSRM) + trecho final tracejado ---- */
-let roadLine=null,lastLine=null,routeEnd=null;
-function clearRoute(){[roadLine,lastLine].forEach(l=>l&&map.removeLayer(l));
-  roadLine=lastLine=routeEnd=null;$("#routeInfo").classList.remove("show");}
+let roadLine=null,lastLine=null,routeEnd=null,routeCoords=null,navLastGap=0,destPt=null;
+function clearRoute(){
+  if(navMode) exitNav();
+  [roadLine,lastLine].forEach(l=>l&&map.removeLayer(l));
+  roadLine=lastLine=routeEnd=routeCoords=destPt=null; navLastGap=0;
+  $("#routeInfo").classList.remove("show");
+  $("#navBtn").disabled=true;
+}
 $("#routeBtn").addEventListener("click",async()=>{
   if(!selected)return;
   if(!userLoc){toast("Toque no botão de localização (canto inferior direito) primeiro.");
@@ -349,6 +396,8 @@ $("#routeBtn").addEventListener("click",async()=>{
     if(lastGap>25){
       lastLine=L.polyline([routeEnd,dest],{color:'#4FC3F7',weight:4,opacity:.95,dashArray:'2 9'}).addTo(map);
     }
+    routeCoords=coords; destPt=dest; navLastGap=lastGap;
+    $("#navBtn").disabled=false;
     const info=$("#routeInfo");
     info.innerHTML=`
       <div class="big">${fmtDist(route.distance+lastGap)} · ~${fmtDur(route.duration)}</div>
@@ -361,6 +410,94 @@ $("#routeBtn").addEventListener("click",async()=>{
   }catch(e){
     toast("Roteamento online indisponível agora. Use Google Maps/Waze para navegação por voz.");
   }finally{$("#routeBtn").innerHTML='<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 11l19-9-9 19-2-8-8-2z"/></svg> Traçar rota até aqui';}
+});
+
+/* ---- modo navegação (segue a rota ao vivo) ---- */
+let navMode=false, follow=true;
+function bearing(a,b){const r=Math.PI/180;
+  const y=Math.sin((b[1]-a[1])*r)*Math.cos(b[0]*r);
+  const x=Math.cos(a[0]*r)*Math.sin(b[0]*r)-Math.sin(a[0]*r)*Math.cos(b[0]*r)*Math.cos((b[1]-a[1])*r);
+  return (Math.atan2(y,x)/r+360)%360;}
+function projectOnSeg(p,a,b){
+  const kx=111320*Math.cos(a[0]*Math.PI/180), ky=110540;
+  const ax=a[1]*kx,ay=a[0]*ky,bx=b[1]*kx,by=b[0]*ky,px=p[1]*kx,py=p[0]*ky;
+  const dx=bx-ax,dy=by-ay,len2=dx*dx+dy*dy||1;
+  let t=((px-ax)*dx+(py-ay)*dy)/len2; t=Math.max(0,Math.min(1,t));
+  return [a[0]+t*(b[0]-a[0]), a[1]+t*(b[1]-a[1])];}
+function projRemain(coords,p){
+  const suf=new Array(coords.length); suf[coords.length-1]=0;
+  for(let i=coords.length-2;i>=0;i--) suf[i]=suf[i+1]+haversine(coords[i],coords[i+1]);
+  let best=Infinity, rem=0;
+  for(let i=0;i<coords.length-1;i++){
+    const proj=projectOnSeg(p,coords[i],coords[i+1]);
+    const d=haversine(p,proj);
+    if(d<best){best=d; rem=haversine(proj,coords[i+1])+suf[i+1];}
+  }
+  return rem;}
+function remainingDist(){
+  if(!userLoc||!destPt) return 0;
+  const straight=haversine(userLoc,destPt);
+  if(!routeCoords) return straight;
+  if(straight <= Math.max(navLastGap,120)) return straight; // aproximação final
+  return projRemain(routeCoords,userLoc)+navLastGap;}
+function updateHeadingMarker(){
+  if(!navMode||!userLoc){ if(headingMarker){map.removeLayer(headingMarker);headingMarker=null;} return; }
+  const html=`<svg class="heading-arrow" width="36" height="36" viewBox="0 0 36 36" style="transform:rotate(${heading}deg)"><path d="M18 3 L28 31 L18 24 L8 31 Z" fill="#00E0A4" stroke="#0D1117" stroke-width="1.6" stroke-linejoin="round"/></svg>`;
+  const icon=L.divIcon({className:'',html,iconSize:[36,36],iconAnchor:[18,18]});
+  if(!headingMarker) headingMarker=L.marker(userLoc,{icon,zIndexOffset:1300,interactive:false}).addTo(map);
+  else{ headingMarker.setLatLng(userLoc); headingMarker.setIcon(icon); }}
+function navUpdate(){
+  if(!userLoc||!destPt) return;
+  const straight=haversine(userLoc,destPt);
+  if(straight<=30){
+    $("#navDist").textContent="Chegou";
+    $("#navSub").textContent="você está no poço";
+  }else{
+    $("#navDist").textContent=fmtDist(remainingDist());
+    $("#navSub").textContent=(navLastGap>25 && straight<=Math.max(navLastGap,120))
+      ? "acesso final — siga a trilha no satélite" : "seguindo a rota";
+  }
+  if(follow) map.panTo(userLoc,{animate:true,duration:.5});
+}
+function startNav(){
+  if(!selected||!destPt) return;
+  if(!window.isSecureContext||!navigator.geolocation){
+    toast("A navegação ao vivo precisa de GPS — abra pelo link https (GitHub Pages). Sem GPS, use Google Maps/Waze.",7000);
+    return;
+  }
+  navMode=true; follow=true;
+  $("#navBanner").classList.add("show");
+  $("#sheet").classList.remove("show"); document.documentElement.style.setProperty("--sheetH","0px");
+  $("#top").style.display="none"; results.classList.remove("show");
+  $("#navDist").textContent="—"; $("#navSub").textContent="obtendo GPS…";
+  if(watchId!=null){navigator.geolocation.clearWatch(watchId);watchId=null;}
+  watchId=navigator.geolocation.watchPosition(
+    w=>setUser(w.coords.latitude,w.coords.longitude,w.coords.accuracy),
+    ()=>toast("Sinal de GPS instável. Verifique a permissão de localização."),
+    {enableHighAccuracy:true,maximumAge:2000,timeout:15000});
+  if(userLoc){ map.setView(userLoc,Math.max(map.getZoom(),17)); updateHeadingMarker(); navUpdate(); }
+}
+function exitNav(){
+  if(!navMode) return;
+  navMode=false; follow=true;
+  $("#navBanner").classList.remove("show");
+  $("#recenter").classList.remove("show");
+  $("#top").style.display="";
+  updateHeadingMarker();
+  if(selected) openSheet();
+}
+$("#navBtn").addEventListener("click",startNav);
+$("#navExit").addEventListener("click",exitNav);
+map.on('dragstart',()=>{ if(navMode){ follow=false; $("#recenter").classList.add("show"); }});
+$("#recenter").addEventListener("click",()=>{ follow=true; $("#recenter").classList.remove("show");
+  if(userLoc) map.setView(userLoc,Math.max(map.getZoom(),17)); });
+
+/* ---- limpar rota ---- */
+$("#clearBtn").addEventListener("click",()=>{
+  clearRoute();            // remove rota, trecho final e sai do modo navegação
+  if(traceMode) exitTrace();
+  tracePts=[]; clearTraceLayers();
+  toast("Rota apagada.");
 });
 
 /* ---- traçar acesso final manualmente sobre o satélite ---- */
